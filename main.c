@@ -28,13 +28,17 @@
 #define BUTTON_PIN_DST (1<<3)
 
 #define MAX72XX_PORT GPIOD
-#define MAX72XX_CS_PIN (1<<2)
+#define MAX72XX_LOAD_PIN (1<<2)
+
+#define SPIOUT_PORT GPIOC
+#define SPIOUT_CLK_PIN (1<<5)
+#define SPIOUT_MOSI_PIN (1<<6)
 
 #define kNumDigits 6
 #define kNumSegments 8
 static uint8_t _segmentWiseData[kNumSegments];
 
-static int8_t _timezoneOffset = 13;
+static int8_t _timezoneOffset = 12;
 static DateTime _gpsTime = {0, 0, 0, 0, 0, 0};
 
 static inline void uart_send_blocking(uint8_t byte)
@@ -104,18 +108,21 @@ void gps_init()
 {
     // Configure time-pulse
     {
+        // Account for 39.5us delay between top-of-second and complete display update
+        const uint16_t timepulseOffsetNs = 39500;
+
         const uint8_t cfg_tp5_data[] = {
             UBX_VALUE_U8(0), // Timepulse selection (only one available on NEO-6M)
             UBX_VALUE_U8(0), // Reserved 0
             UBX_VALUE_U16(0), // Reserved 1
             UBX_VALUE_S16(50), // Antenna cable delay (nS)
-            UBX_VALUE_S16(0), // RF group delay (nS)
-            UBX_VALUE_U32(0), // Freqency of time pulse in Hz
+            UBX_VALUE_S16(0), // RF group delay (readonly)
+            UBX_VALUE_U32(1), // Freqency of time pulse in Hz
             UBX_VALUE_U32(1), // Freqency of time pulse in Hz when locked to GPS time
             UBX_VALUE_U32(1000), // Length of time pulse in uS
             UBX_VALUE_U32(10000), // Length of time pulse in uS when locked to GPS time
-            UBX_VALUE_S32(0), // User configurable timepuse delay (nS)
-            UBX_VALUE_U32(0b11111111), // Flags
+            UBX_VALUE_S32(timepulseOffsetNs), // User configurable timepuse delay (nS)
+            UBX_VALUE_U32(0xFF), // All flags set
         };
 
         ubx_send(0x06, 0x31, cfg_tp5_data, sizeof(cfg_tp5_data));
@@ -163,23 +170,22 @@ inline void spi_send_blocking(uint8_t data)
     SPI->DR = data;
 
     // Wait for TX buffer empty flag
-    while (SPI_GetFlagStatus(SPI_FLAG_TXE) != SET);
+    while (!(SPI->SR & SPI_FLAG_TXE));
 }
 
 static void max7219_cmd(uint8_t address, uint8_t data)
 {
-    // Chip select (active low)
-    MAX72XX_PORT->ODR &= ~MAX72XX_CS_PIN;
+    // Prepare for generating a rising edge on the LOAD pin
+    MAX72XX_PORT->ODR &= ~MAX72XX_LOAD_PIN;
 
     spi_send_blocking(address);
     spi_send_blocking(data);
 
-    // Wait for busy flag to clear
-    while (SPI_GetFlagStatus(SPI_FLAG_BSY) != RESET);
+    // Wait for the SPI transmission to complete
+    while ((SPI->SR & SPI_FLAG_BSY));
 
-    // Disable chip select
-    MAX72XX_PORT->ODR |= MAX72XX_CS_PIN;
-    _delay_us(10);
+    // Generate rising edge to latch command and data bytes
+    MAX72XX_PORT->ODR |= MAX72XX_LOAD_PIN;
 }
 
 /**
@@ -193,11 +199,17 @@ static void max7219_cmd(uint8_t address, uint8_t data)
  */
 static void max7219_write_digits()
 {
+    // Block interrupts during display update to avoid contention with the brightness update interrupt
+    disableInterrupts();
+
     for (uint8_t i = 0; i < kNumSegments; ++i) {
         const uint8_t digitRegister = i + 1;
         max7219_cmd(digitRegister, _segmentWiseData[i]);
     }
+
+    enableInterrupts();
 }
+
 
 /**
  * Emulate setting a digit register on the MAX72XX (mapped for common anode wiring)
@@ -306,11 +318,8 @@ static void apply_timezone_offset(DateTime* now)
 /**
  * Send the current time to the MAX7219 as 6 BCD digits
  */
-static void display_update(DateTime* now)
+static void display_set_buffer(DateTime* now)
 {
-    // Block interrupts during display update to avoid contention with brightness update interrupt
-    disableInterrupts();
-
     // Send time to display
     uint8_t digit = 1;
 
@@ -329,10 +338,6 @@ static void display_update(DateTime* now)
         max7219_set_digit_bcd(digit++, tens);
         max7219_set_digit_bcd(digit++, ones);
     }
-
-    max7219_write_digits();
-
-    enableInterrupts();
 }
 
 /**
@@ -409,6 +414,25 @@ void display_adjust_brightness(void)
     max7219_cmd(0x0A, average / 64);
 }
 
+void increment_time(DateTime* tim)
+{
+    ++tim->second;
+
+    if (tim->second == 60) {
+        tim->second = 0;
+        ++tim->minute;
+    }
+
+    if (tim->minute == 60) {
+        tim->minute = 0;
+        ++tim->hour;
+    }
+
+    if (tim->hour == 24) {
+        tim->hour = 0;
+    }
+}
+
 int main()
 {
     // Configure the clock for maximum speed on the 16MHz HSI oscillator
@@ -434,14 +458,22 @@ int main()
     BUTTON_PORT->CR1 |= BUTTON_PIN_DST | BUTTON_PIN_TIMEZONE; // Enable internal pull-up
 
     // MAX7219  chip select as output
-    MAX72XX_PORT->DDR |= MAX72XX_CS_PIN; // Output mode
-    MAX72XX_PORT->CR1 |= MAX72XX_CS_PIN; // Push-pull mode
-    MAX72XX_PORT->CR2 |= MAX72XX_CS_PIN; // Speed up to 10Mhz
-    MAX72XX_PORT->ODR |= MAX72XX_CS_PIN; // Active low: initially set high
+    MAX72XX_PORT->DDR |= MAX72XX_LOAD_PIN; // Output mode
+    MAX72XX_PORT->CR1 |= MAX72XX_LOAD_PIN; // Push-pull mode
+    MAX72XX_PORT->CR2 |= MAX72XX_LOAD_PIN; // Speed up to 10Mhz
+    MAX72XX_PORT->ODR |= MAX72XX_LOAD_PIN; // Active low: initially set high
+
+    // Set SPI output pins to high-speed mode per the datasheet:
+    //
+    // > When using the SPI in High-speed mode, the I/Os where SPI outputs are connected should
+    // > be programmed as fast slope outputs in order to be able to reach the expected bus speed.
+    //
+    SPIOUT_PORT->DDR |= SPIOUT_MOSI_PIN | SPIOUT_CLK_PIN; // Output
+    SPIOUT_PORT->CR2 |= SPIOUT_MOSI_PIN | SPIOUT_CLK_PIN; // High-speed
 
     // Enable SPI for MAX7219 display driver
     SPI_Init(SPI_FIRSTBIT_MSB,
-             SPI_BAUDRATEPRESCALER_32,
+             SPI_BAUDRATEPRESCALER_2,
              SPI_MODE_MASTER,
              SPI_CLOCKPOLARITY_LOW,
              SPI_CLOCKPHASE_1EDGE,
@@ -519,13 +551,19 @@ int main()
 
     while (true) {
         // Wait for a line of text from the GPS unit
-        const GpsReadStatus status = gps_read_time(&_gpsTime);
+        DateTime newTime;
+        const GpsReadStatus status = gps_read_time(&newTime);
 
         switch (status) {
             case kGPS_Success:
+                _gpsTime = newTime;
+
                 // Update the display with the new parsed time
                 apply_timezone_offset(&_gpsTime);
-                display_update(&_gpsTime);
+
+                // Prepare the value to be sent at the next time pulse from the GPS
+                increment_time(&_gpsTime);
+                display_set_buffer(&_gpsTime);
                 break;
 
             case kGPS_NoMatch:
@@ -573,10 +611,7 @@ void uart1_receive_irq(void) __interrupt(ITC_IRQ_UART1_RX)
 
 void gps_irq(void) __interrupt(ITC_IRQ_PORTB)
 {
-    // TODO: make this volatile
-    // Enable decimal point on all digits
-    // _segmentWiseData[7] = (1<<2);
-    // max7219_write_digits();
+    max7219_write_digits();
 }
 
 void adc_irq(void) __interrupt(ITC_IRQ_ADC1)
