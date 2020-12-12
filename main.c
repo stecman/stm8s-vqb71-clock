@@ -135,6 +135,44 @@ const uint8_t gps_cfg_nav5_data[] = {
     UBX_VALUE_U32(0), // Reserved
     UBX_VALUE_U32(0), // Reserved
 };
+
+// ID byte of NMEA messages to enable
+// All messages share the same class byte of 0xF0
+const uint8_t gps_enableMessages[] = {
+    0x03, // GSV (GNSS Satellites in View)
+    0x04, // RMC (Recommended Minimum data)
+};
+
+// ID byte of NMEA messages to disable
+// All messages share the same class byte of 0xF0
+const uint8_t gps_disableMessages[] = {
+    0x0A, // DTM (Datum Reference)
+    0x09, // GBS (GNSS Satellite Fault Detection)
+    0x00, // GGA (Global positioning system fix data)
+    0x01, // GLL (Latitude and longitude, with time of position fix and status)
+    0x40, // GPQ (Poll message)
+    0x06, // GRS (GNSS Range Residuals)
+    0x02, // GSA (GNSS DOP and Active Satellites)
+    0x07, // GST (GNSS Pseudo Range Error Statistics)
+    0x0E, // THS (True Heading and Status)
+    0x41, // TXT (Text Transmission)
+    0x05, // VTG (Course over ground and Ground speed)
+};
+
+void gps_set_nmea_send_rate(const uint8_t rate, const uint8_t* messageIds, const uint8_t length)
+{
+    // Buffer for message rate configuration
+    uint8_t cfg_msg_data[3] = {
+        0xF0, // Message class
+        0, // Message ID placeholder
+        rate, // Send rate
+    };
+
+    // Set send rate to zero to disable messages
+    for (uint8_t i = 0; i < length; ++i) {
+        cfg_msg_data[1] = messageIds[i];
+        ubx_send(0x06, 0x01, cfg_msg_data, sizeof(cfg_msg_data));
+    }
 }
 
 // Wait for GPS start-up
@@ -146,16 +184,9 @@ void gps_init()
     // Configure stationary mode
     ubx_send(0x06, 0x24, gps_cfg_nav5_data, sizeof(gps_cfg_nav5_data));
 
-    // Disable NMEA messages we don't care about
-    // These are mostly positioning messages since we're operating in stationary mode
-    {
-        // ID byte of each message to disable
-        // All messages share the same class byte of 0xF0
-        const uint8_t disableMessages = {
-            0x05, // VTG (Course over ground and ground speed)
-            0x01, // GGL (Latitude and longitude with time of position fix and status)
-        };
-    }
+    // Enable NMEA messages we want to use and disable others
+    gps_set_nmea_send_rate(1, gps_enableMessages, sizeof(gps_enableMessages));
+    gps_set_nmea_send_rate(0, gps_disableMessages, sizeof(gps_disableMessages));
 }
 
 inline void spi_send_blocking(uint8_t data)
