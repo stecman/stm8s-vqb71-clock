@@ -68,23 +68,36 @@ env = Environment(
 env.Alias(
     'flash',
     env.Command(
-        None,
+        '_flash_phony_output',
         HEX_FILE,
         'stm8flash -c $STM8_PROGRAMMER -p $STM8_DEVICE_PROG -w $SOURCES'
     )
 )
 
-# Only build the hex file by default (don't try to flash, etc)
-env.Default(
-    env.Program(
+env.Alias(
+    'size',
+    env.Command(
+        '_size_phony_output',
         HEX_FILE,
-        [
-            'main.c',
-            'delay.c',
-            'nmea.c',
-            'driver/src/stm8s_clk.c',
-            'driver/src/stm8s_spi.c',
-            'driver/src/stm8s_uart1.c',
-        ]
+        'size $SOURCES'
     )
 )
+
+build = env.Program(
+    HEX_FILE,
+    [
+        'main.c',
+        'delay.c',
+        'nmea.c',
+        'driver/src/stm8s_clk.c',
+        'driver/src/stm8s_spi.c',
+        'driver/src/stm8s_uart1.c',
+    ]
+)
+
+# Remove the build directory when doing a clean (-c)
+Clean(build, '../build')
+
+# Only build the hex file by default (don't try to flash, etc)
+env.Default(build, 'size')
+
