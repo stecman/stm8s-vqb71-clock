@@ -515,7 +515,7 @@ int main()
     // Configure test points as outputs
     TEST_PIN_PORT->DDR = TEST_PIN_1 | TEST_PIN_2; // Output mode
     TEST_PIN_PORT->CR1 = TEST_PIN_1 | TEST_PIN_2; // Push-pull mode
-    TEST_PIN_PORT->ODR = TEST_PIN_1 | TEST_PIN_2; // Speed up to 10Mhz
+    TEST_PIN_PORT->ODR = TEST_PIN_1 | TEST_PIN_2; // Pull high
 
     // Interrupt outputs from GPS as inputs
     EXTI->CR1 |= 0x04; // Rising edge triggers interrupt
