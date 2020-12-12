@@ -72,6 +72,9 @@ static inline uint8_t gps_atoi(char *str)
     return result;
 }
 
+// RMC sentence header (without null termination)
+const char GPRMC[] = {'G', 'P', 'R', 'M', 'C'};
+
 GpsReadStatus gps_read_time(DateTime* output)
 {
 
@@ -84,8 +87,7 @@ GpsReadStatus gps_read_time(DateTime* output)
     // Which field in the output is currently being written to
     uint8_t outputIndex = 0;
 
-    // RMC sentence header (without null termination)
-    const char GPRMC[] = {'G', 'P', 'R', 'M', 'C'};
+    // Current search index into GPRMC array
     uint8_t typeStrIndex = 0;
 
     // Initial states for  sentence matching

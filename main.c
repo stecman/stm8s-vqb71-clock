@@ -101,56 +101,50 @@ static void ubx_send(uint8_t msgClass, uint8_t msgId, uint8_t* data, uint16_t le
     // Hack: wait for ACK response
     // TODO: replace this with actually reading the ACK/NACK response and returning true/false
     _delay_ms(50);
+// Account for 39.5us delay between top-of-second and complete display update
+#define kTimepulseOffsetNs 39500
+const uint8_t gps_cfg_tp5_data[] = {
+    UBX_VALUE_U8(0), // Timepulse selection (only one available on NEO-6M)
+    UBX_VALUE_U8(0), // Reserved 0
+    UBX_VALUE_U16(0), // Reserved 1
+    UBX_VALUE_S16(50), // Antenna cable delay (nS)
+    UBX_VALUE_S16(0), // RF group delay (readonly)
+    UBX_VALUE_U32(1), // Freqency of time pulse in Hz
+    UBX_VALUE_U32(1), // Freqency of time pulse in Hz when locked to GPS time
+    UBX_VALUE_U32(1000), // Length of time pulse in uS
+    UBX_VALUE_U32(10000), // Length of time pulse in uS when locked to GPS time
+    UBX_VALUE_S32(kTimepulseOffsetNs), // User configurable timepuse delay (nS)
+    UBX_VALUE_U32(0xFF), // All flags set
+};
+
+const uint8_t gps_cfg_nav5_data[] = {
+    UBX_VALUE_U16(0b00111111), // Mask selecting settings to apply
+    UBX_VALUE_U8(2), // "Stationary" dynamic platform model
+    UBX_VALUE_U8(3), // Get either a 3D or 2D fix
+    UBX_VALUE_U32(0), // fixed altitude for 2D
+    UBX_VALUE_U32(0), // fixed altitude variance for 2D
+    UBX_VALUE_U8(20), // minimum elevation is 20 degrees...
+    UBX_VALUE_U8(180), // maximum time to perform dead reckoning in case of GPS signal loss (s)
+    UBX_VALUE_U16(100), // position DoP mask is 10.0...
+    UBX_VALUE_U16(100), // time DoP mask is 10.0...
+    UBX_VALUE_U16(100), // position accuracy mask in meters...
+    UBX_VALUE_U16(100), // time accuracy mask in meters...
+    UBX_VALUE_U8(0), // static hold threshold is 0 cm/s...
+    UBX_VALUE_U8(60), // dynamic GNSS timeout is 60 seconds (not used)...
+    UBX_VALUE_U32(0), // Reserved
+    UBX_VALUE_U32(0), // Reserved
+    UBX_VALUE_U32(0), // Reserved
+};
 }
 
 // Wait for GPS start-up
 void gps_init()
 {
     // Configure time-pulse
-    {
-        // Account for 39.5us delay between top-of-second and complete display update
-        const uint16_t timepulseOffsetNs = 39500;
-
-        const uint8_t cfg_tp5_data[] = {
-            UBX_VALUE_U8(0), // Timepulse selection (only one available on NEO-6M)
-            UBX_VALUE_U8(0), // Reserved 0
-            UBX_VALUE_U16(0), // Reserved 1
-            UBX_VALUE_S16(50), // Antenna cable delay (nS)
-            UBX_VALUE_S16(0), // RF group delay (readonly)
-            UBX_VALUE_U32(1), // Freqency of time pulse in Hz
-            UBX_VALUE_U32(1), // Freqency of time pulse in Hz when locked to GPS time
-            UBX_VALUE_U32(1000), // Length of time pulse in uS
-            UBX_VALUE_U32(10000), // Length of time pulse in uS when locked to GPS time
-            UBX_VALUE_S32(timepulseOffsetNs), // User configurable timepuse delay (nS)
-            UBX_VALUE_U32(0xFF), // All flags set
-        };
-
-        ubx_send(0x06, 0x31, cfg_tp5_data, sizeof(cfg_tp5_data));
-    }
+    ubx_send(0x06, 0x31, gps_cfg_tp5_data, sizeof(gps_cfg_tp5_data));
 
     // Configure stationary mode
-    {
-        const uint8_t cfg_nav5_data[] = {
-            UBX_VALUE_U16(0b00111111), // Mask selecting settings to apply
-            UBX_VALUE_U8(2), // "Stationary" dynamic platform model
-            UBX_VALUE_U8(3), // Get either a 3D or 2D fix
-            UBX_VALUE_U32(0), // fixed altitude for 2D
-            UBX_VALUE_U32(0), // fixed altitude variance for 2D
-            UBX_VALUE_U8(20), // minimum elevation is 20 degrees...
-            UBX_VALUE_U8(180), // maximum time to perform dead reckoning in case of GPS signal loss (s)
-            UBX_VALUE_U16(100), // position DoP mask is 10.0...
-            UBX_VALUE_U16(100), // time DoP mask is 10.0...
-            UBX_VALUE_U16(100), // position accuracy mask in meters...
-            UBX_VALUE_U16(100), // time accuracy mask in meters...
-            UBX_VALUE_U8(0), // static hold threshold is 0 cm/s...
-            UBX_VALUE_U8(60), // dynamic GNSS timeout is 60 seconds (not used)...
-            UBX_VALUE_U32(0), // Reserved
-            UBX_VALUE_U32(0), // Reserved
-            UBX_VALUE_U32(0), // Reserved
-        };
-
-        ubx_send(0x06, 0x24, cfg_nav5_data, sizeof(cfg_nav5_data));
-    }
+    ubx_send(0x06, 0x24, gps_cfg_nav5_data, sizeof(gps_cfg_nav5_data));
 
     // Disable NMEA messages we don't care about
     // These are mostly positioning messages since we're operating in stationary mode
@@ -215,20 +209,21 @@ static void max7219_write_digits()
  * Emulate setting a digit register on the MAX72XX (mapped for common anode wiring)
  * Digit register is 1-indexed.
  */
+
+// Map of logical digit index to rev 1.0 board wiring using a MAX7221
+const uint8_t max7219_digitMap[kNumSegments] = {
+    /* 0: */ 0,
+    /* 1: */ 4,
+    /* 2: */ 3,
+    /* 3: */ 1,
+    /* 4: */ 5,
+    /* 5: */ 2,
+};
+
 static void max7219_set_digit(uint8_t digitRegister, uint8_t segments)
 {
-    // Map of logical digit index to rev 1.0 board wiring using a MAX7221
-    const uint8_t digitMap[kNumSegments] = {
-        /* 0: */ 0,
-        /* 1: */ 4,
-        /* 2: */ 3,
-        /* 3: */ 1,
-        /* 4: */ 5,
-        /* 5: */ 2,
-    };
-
     // Map logical digit to actual hardware wiring
-    const uint8_t mappedDigit = digitMap[digitRegister - 1];
+    const uint8_t mappedDigit = max7219_digitMap[digitRegister - 1];
 
     // Create a bitmask for the 1-indexed digit register
     const uint8_t digitMask = (1<<mappedDigit);
@@ -250,29 +245,29 @@ static void max7219_set_digit(uint8_t digitRegister, uint8_t segments)
  * Emulate writing a digit under the MAX72XX's BCD display mode (mapped for common anode wiring)
  * Digit register is 1-indexed
  */
+const uint8_t max7219_bcdMap[16] = {
+    0b00111111, // 0
+    0b00000110, // 1
+    0b01011011, // 2
+    0b01001111, // 3
+    0b01100110, // 4
+    0b01101101, // 5
+    0b01111101, // 6
+    0b00000111, // 7
+    0b01111111, // 8
+    0b01101111, // 9
+    0b01000000, // -
+    0b01111001, // E
+    0b01110110, // H
+    0b00111000, // L
+    0b01110011, // P
+    0x0,        // Blank
+};
+
 static void max7219_set_digit_bcd(uint8_t digitRegister, uint8_t value)
 {
-    const uint8_t bcdMap[16] = {
-        0b00111111, // 0
-        0b00000110, // 1
-        0b01011011, // 2
-        0b01001111, // 3
-        0b01100110, // 4
-        0b01101101, // 5
-        0b01111101, // 6
-        0b00000111, // 7
-        0b01111111, // 8
-        0b01101111, // 9
-        0b01000000, // -
-        0b01111001, // E
-        0b01110110, // H
-        0b00111000, // L
-        0b01110011, // P
-        0x0,        // Blank
-    };
-
     // Get segments that should be on
-    uint8_t segments = bcdMap[value & 0xF];
+    uint8_t segments = max7219_bcdMap[value & 0xF];
 
     // Turn on the decimal point if the most-significant bit is set
     segments |= (value & 0x80);
