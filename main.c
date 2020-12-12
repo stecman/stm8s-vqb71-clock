@@ -41,6 +41,8 @@ static uint8_t _segmentWiseData[kNumSegments];
 static int8_t _timezoneOffset = 12;
 static DateTime _gpsTime = {0, 0, 0, 0, 0, 0};
 
+char uart_read_byte(void);
+
 static inline void uart_send_blocking(uint8_t byte)
 {
     // Wait for the last transmission to complete
@@ -77,30 +79,71 @@ static void ubx_update_checksum_multi(uint8_t* checksum, uint8_t* data, uint16_t
 	}
 }
 
-static void ubx_send(uint8_t msgClass, uint8_t msgId, uint8_t* data, uint16_t length)
+enum UbxResponse {
+    kUbxNack = 0, // Matches the NACK message ID
+    kUbxAck = 1,  // Matches the ACK message ID
+    kUbxResponseTimeout = 0x55,
+    kUbxBadResponse = 0xBD
+};
+
+static enum UbxResponse ubx_send(uint8_t msgClass, uint8_t msgId, uint8_t* data, uint16_t length)
 {
-	uint8_t header[6] = {
-		0xB5, 0x62, // Every message starts with these sync characters
-		msgClass,
-		msgId,
-		(uint8_t) (length & 0xFF), // Payload length as little-endian (LSB first)
-		(uint8_t) (length >> 8),
-	};
+    // Send packet to receiver
+    {
+    	uint8_t header[6] = {
+    		0xB5, 0x62, // Every message starts with these sync characters
+    		msgClass,
+    		msgId,
+    		(uint8_t) (length & 0xFF), // Payload length as little-endian (LSB first)
+    		(uint8_t) (length >> 8),
+    	};
 
-	uint8_t checksum[2] = {0, 0};
+    	uint8_t checksum[2] = {0, 0};
 
-	// Checksum includes the payload and the header minus its two fixed bytes
-	ubx_update_checksum_multi(checksum, (uint8_t*)(&header) + 2, sizeof(header) - 2);
-	ubx_update_checksum_multi(checksum, data, length);
+    	// Checksum includes the payload and the header minus its two fixed bytes
+    	ubx_update_checksum_multi(checksum, (uint8_t*)(&header) + 2, sizeof(header) - 2);
+    	ubx_update_checksum_multi(checksum, data, length);
 
-	// Send the message over serial
-	uart_send_stream_blocking(header, sizeof(header));
-	uart_send_stream_blocking(data, length);
-	uart_send_stream_blocking(checksum, sizeof(checksum));
+    	// Send the message over serial
+    	uart_send_stream_blocking(header, sizeof(header));
+    	uart_send_stream_blocking(data, length);
+    	uart_send_stream_blocking(checksum, sizeof(checksum));
+    }
 
-    // Hack: wait for ACK response
-    // TODO: replace this with actually reading the ACK/NACK response and returning true/false
-    _delay_ms(50);
+    // Look for receiver response
+    // TODO: make this a more generic UBX packet reading routine that verifies checksum
+    // TODO: handle response timeout. Currently this blocks forever if the GPS doesn't respond
+    {
+        const uint8_t response_header[] = {0xB5, 0x62, 0x05};
+
+        uint8_t searchIndex = 0;
+        enum UbxResponse response = kUbxBadResponse;
+
+        // Wait for the ACK/NACK response header
+        while (searchIndex < sizeof(response_header)) {
+            const char byte = uart_read_byte();
+
+            if (byte == response_header[searchIndex]) {
+                ++searchIndex;
+            }
+        }
+
+        // Read message ID as response
+        response = uart_read_byte();
+
+        // Discard packet length as we're not using it here
+        uart_read_byte();
+        uart_read_byte();
+
+        if (uart_read_byte() == msgClass &&
+            uart_read_byte() == msgId) {
+            return response;
+        } else {
+            return kUbxBadResponse;
+        }
+    }
+}
+
 // Account for 39.5us delay between top-of-second and complete display update
 #define kTimepulseOffsetNs 39500
 const uint8_t gps_cfg_tp5_data[] = {
@@ -620,7 +663,7 @@ int main()
 
 volatile static CircBuf _uartBuffer;
 
-char uart_read_byte()
+char uart_read_byte(void)
 {
     // Block until a character is available
     while (circbuf_is_empty(&_uartBuffer));
