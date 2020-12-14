@@ -38,8 +38,9 @@
 #define kNumSegments 8
 static uint8_t _segmentWiseData[kNumSegments];
 
-static int8_t _timezoneOffset = 12;
-static DateTime _gpsTime = {0, 0, 0, 0, 0, 0};
+static int8_t _timezoneOffset = 13;
+static volatile DateTime _gpsTime = {0, 0, 0, 0, 0, 0};
+static volatile bool _gpsPreparingNextTime = false;
 
 char uart_read_byte(void);
 
@@ -606,7 +607,7 @@ int main()
     max7219_cmd(0x0A, 0xA);
 
     // Illuminate each of the outline segments one at a time
-    for (uint8_t i = 0; i < 6; ++i) {
+    for (uint8_t i = 0; i < kNumDigits; ++i) {
         _segmentWiseData[i] = 0xFF;
         max7219_write_digits();
 
@@ -625,14 +626,16 @@ int main()
 
         switch (status) {
             case kGPS_Success:
+                // Prepare the value to be sent at the next time pulse from the GPS
+                apply_timezone_offset(&newTime);
+                increment_time(&newTime);
+
+                _gpsPreparingNextTime = true;
+
+                display_set_buffer(&newTime);
                 _gpsTime = newTime;
 
-                // Update the display with the new parsed time
-                apply_timezone_offset(&_gpsTime);
-
-                // Prepare the value to be sent at the next time pulse from the GPS
-                increment_time(&_gpsTime);
-                display_set_buffer(&_gpsTime);
+                _gpsPreparingNextTime = false;
                 break;
 
             case kGPS_NoMatch:
@@ -681,6 +684,12 @@ void uart1_receive_irq(void) __interrupt(ITC_IRQ_UART1_RX)
 void gps_irq(void) __interrupt(ITC_IRQ_PORTB)
 {
     max7219_write_digits();
+
+    // Prepare the next update if it's not already being written by the main loop
+    if (!_gpsPreparingNextTime) {
+        increment_time(&_gpsTime);
+        display_set_buffer(&_gpsTime);
+    }
 }
 
 void adc_irq(void) __interrupt(ITC_IRQ_ADC1)
