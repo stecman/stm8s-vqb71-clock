@@ -38,7 +38,7 @@
 #define kNumSegments 8
 static uint8_t _segmentWiseData[kNumSegments];
 
-static int8_t _timezoneOffset = 13;
+static volatile int8_t _timezoneOffset = 13;
 static volatile DateTime _gpsTime = {0, 0, 0, 0, 0, 0};
 static volatile bool _gpsPreparingNextTime = false;
 
@@ -368,7 +368,7 @@ static void max7219_init(void)
 }
 
 /**
- * Modify the passed time with the current timezone offset
+ * Update the passed time to the current timezone offset
  */
 static void apply_timezone_offset(DateTime* now)
 {
@@ -386,7 +386,7 @@ static void apply_timezone_offset(DateTime* now)
 }
 
 /**
- * Send the current time to the MAX7219 as 6 BCD digits
+ * Send the passed time to the MAX7219 as 6 BCD digits
  */
 static void display_set_buffer(DateTime* now)
 {
@@ -510,7 +510,7 @@ int main()
     // CLK->CKDIVR = (CLK_PRESCALER_CPUDIV8 & CLK_CKDIVR_CPUDIV);
     CLK->CKDIVR = 0x0;
 
-    // Delay to prevent partial initialisation when programming (reset is only blipped low)
+    // Delay to prevent partial initialisation when programming (reset is only blipped low by the programmer)
     _delay_ms(10);
 
     // Configure test points as outputs
@@ -524,8 +524,11 @@ int main()
     GPS_PORT->CR1 |= GPS_PIN_TIMEPULSE;  // Enable internal pull-up
     GPS_PORT->CR2 |= GPS_PIN_TIMEPULSE;  // Interrupt enabled
 
+    // Buttons as input
+    EXTI->CR1 |= 0x02; // Falling edge triggers interrupt
     BUTTON_PORT->DDR &= ~(BUTTON_PIN_DST | BUTTON_PIN_TIMEZONE); // Input mode
     BUTTON_PORT->CR1 |= BUTTON_PIN_DST | BUTTON_PIN_TIMEZONE; // Enable internal pull-up
+    BUTTON_PORT->CR2 |= BUTTON_PIN_DST | BUTTON_PIN_TIMEZONE;  // Interrupt enabled
 
     // MAX7219  chip select as output
     MAX72XX_PORT->DDR |= MAX72XX_LOAD_PIN; // Output mode
@@ -618,15 +621,20 @@ int main()
     max7219_write_digits();
 
     gps_init();
+    nmea_init();
 
     while (true) {
-        // Wait for a line of text from the GPS unit
-        DateTime newTime;
-        const GpsReadStatus status = gps_read_time(&newTime);
+
+        const GpsReadStatus status = nmea_parse(uart_read_byte());
 
         switch (status) {
-            case kGPS_Success:
+            case kGPS_RMC_TimeUpdated: {
                 // Prepare the value to be sent at the next time pulse from the GPS
+				const DateTime* lastTick = nmea_get_time();
+
+				DateTime newTime;
+				newTime = (*lastTick);
+
                 apply_timezone_offset(&newTime);
                 increment_time(&newTime);
 
@@ -637,12 +645,9 @@ int main()
 
                 _gpsPreparingNextTime = false;
                 break;
+			}
 
-            case kGPS_NoMatch:
-                // Ignore partial and unknown sentences
-                break;
-
-            case kGPS_NoSignal:
+            case kGPS_RMC_NoSignal:
                 // Walk the decimal point across the display to indicate activity
                 display_no_signal();
                 break;

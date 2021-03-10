@@ -16,7 +16,7 @@ EXTERNAL_RAM_SIZE_BYTES = 0
 # Compiled hex file target
 HEX_FILE = 'main.ihx'
 
-env = Environment(
+env_target = Environment(
     CC = 'sdcc',
 
     CPPDEFINES = {
@@ -65,25 +65,25 @@ env = Environment(
     STM8_DEVICE_PROG = STM8_DEVICE_PROG,
 )
 
-env.Alias(
+env_target.Alias(
     'flash',
-    env.Command(
+    env_target.Command(
         '_flash_phony_output',
         HEX_FILE,
         'stm8flash -c $STM8_PROGRAMMER -p $STM8_DEVICE_PROG -w $SOURCES'
     )
 )
 
-env.Alias(
+env_target.Alias(
     'size',
-    env.Command(
+    env_target.Command(
         '_size_phony_output',
         HEX_FILE,
         'size $SOURCES'
     )
 )
 
-build = env.Program(
+build_target = env_target.Program(
     HEX_FILE,
     [
         'main.c',
@@ -95,9 +95,57 @@ build = env.Program(
     ]
 )
 
-# Remove the build directory when doing a clean (-c)
-Clean(build, '../build')
-
 # Only build the hex file by default (don't try to flash, etc)
-env.Default(build, 'size')
+env_target.Default(build_target, 'size')
 
+# Remove the build directory when doing a clean (-c)
+Clean(build_target, '../build')
+
+
+###
+
+
+env_testing = Environment(
+    # Header search paths
+    # Note that these are relative to the build directory (if SConstruct src='.'')
+    CPPPATH = [
+        '',
+        '.',
+        '../driver/inc',
+    ],
+
+    CFLAGS = [
+        '-ggdb3',
+        '-Og',
+    ]
+)
+
+env_testing.Alias(
+    'build_tests',
+    env_testing.Program(
+        'testsuite',
+        [
+            'tests/munit/munit.c',
+            'tests/suite.c',
+            'tests/test_nmea.c',
+            'nmea.c',
+        ]
+    ),
+)
+
+env_testing.Alias(
+    'run_tests',
+    env_target.Command(
+        '_run_tests_phony_output',
+        'testsuite',
+        './$SOURCES'
+    )
+)
+
+env_testing.Alias(
+    'test',
+    [
+        'build_tests',
+        'run_tests',
+    ]
+)

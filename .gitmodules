@@ -1,3 +1,7 @@
 [submodule "driver"]
-	path = driver
-	url = https://github.com/stecman/stm8s-sdcc.git
+    path = driver
+    url = https://github.com/stecman/stm8s-sdcc.git
+
+[submodule "munit"]
+	path = tests/munit
+	url = https://github.com/nemequ/munit.git
