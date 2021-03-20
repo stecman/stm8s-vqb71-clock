@@ -35,20 +35,7 @@ This should be available in your distribution's pacakage manager. It can also be
 
 ### SDCC (compiler)
 
-[SDCC](http://sdcc.sourceforge.net/) may be available in your distro's package manager. I recommend installing from source to get the most recent release, as the Debian and Ubuntu repos can be a few versions behind:
-
-```sh
-# with Git
-git clone https://github.com/svn2github/sdcc
-
-# or with SVN
-svn co http://svn.code.sf.net/p/sdcc/code/trunk sdcc
-
-cd sdcc/sdcc
-./configure
-make
-sudo make install
-```
+This project requires [SDCC](http://sdcc.sourceforge.net/) 3.9 or newer.
 
 ### stm8flash (flashing tool)
 
