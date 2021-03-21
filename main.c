@@ -39,8 +39,9 @@
 static uint8_t _segmentWiseData[kNumSegments];
 
 static volatile int8_t _timezoneOffset = 13;
-static volatile DateTime _gpsTime = {0, 0, 0, 0, 0, 0};
+static volatile DateTime _gpsTime;
 static volatile bool _gpsPreparingNextTime = false;
+static volatile bool _hasSignal = false;
 
 char uart_read_byte(void);
 
@@ -388,26 +389,29 @@ static void apply_timezone_offset(DateTime* now)
 /**
  * Send the passed time to the MAX7219 as 6 BCD digits
  */
+static void display_set_buffer_partial(uint8_t digitIndex, uint8_t value)
+{
+    // Manually split out tens and ones columns
+    // This saves some code space over using division
+    uint8_t tens = 0;
+
+    while (value >= 10) {
+        value -= 10;
+        ++tens;
+    }
+
+    max7219_set_digit_bcd(digitIndex, tens);
+    max7219_set_digit_bcd(digitIndex + 1, value);
+}
+
+/**
+ * Send the passed time to the MAX7219 as 6 BCD digits
+ */
 static void display_set_buffer(DateTime* now)
 {
-    // Send time to display
-    uint8_t digit = 1;
-
-    for (int8_t i = 0; i < 3; ++i) {
-
-        // Manually digit into tens and ones columns
-        // This saves 25 bytes vs. using the divide and modulo operators.
-        uint8_t ones = ((uint8_t*) now)[i];
-        uint8_t tens = 0;
-
-        while (ones >= 10) {
-            ones -= 10;
-            ++tens;
-        }
-
-        max7219_set_digit_bcd(digit++, tens);
-        max7219_set_digit_bcd(digit++, ones);
-    }
+    display_set_buffer_partial(1, now->hour);
+    display_set_buffer_partial(3, now->minute);
+    display_set_buffer_partial(5, now->second);
 }
 
 /**
@@ -420,21 +424,20 @@ static void display_clear()
     }
 }
 
-static void display_no_signal()
+static void display_overlay_ticker()
 {
     static uint8_t waitIndicator = 0;
 
-    display_clear();
+    // Clear segment on all digits
+    _segmentWiseData[7] = 0x0;
 
-    // Turn on the decimal point on one digit (digits are 1-indexed)
-    max7219_set_digit_bcd(waitIndicator + 1, 0x8F);
+    // Set segment on next phsyical digit
+    _segmentWiseData[7] = (1<<max7219_digitMap[waitIndicator]);
 
     ++waitIndicator;
     if (waitIndicator == kNumDigits) {
         waitIndicator = 0;
     }
-
-    max7219_write_digits();
 }
 
 void display_error_code(uint8_t code)
@@ -610,15 +613,14 @@ int main()
     max7219_cmd(0x0A, 0xA);
 
     // Illuminate each of the outline segments one at a time
-    for (uint8_t i = 0; i < kNumDigits; ++i) {
+    for (uint8_t i = 0; i < 6; ++i) {
         _segmentWiseData[i] = 0xFF;
         max7219_write_digits();
+        _delay_ms(50);
 
         _segmentWiseData[i] = 0x00;
-        _delay_ms(50);
+        max7219_write_digits();
     }
-
-    max7219_write_digits();
 
     gps_init();
     nmea_init();
@@ -629,11 +631,13 @@ int main()
 
         switch (status) {
             case kGPS_RMC_TimeUpdated: {
-                // Prepare the value to be sent at the next time pulse from the GPS
-				const DateTime* lastTick = nmea_get_time();
+                _hasSignal = true;
 
-				DateTime newTime;
-				newTime = (*lastTick);
+                // Prepare the value to be sent at the next time pulse from the GPS
+                const DateTime* lastTick = nmea_get_time();
+
+                DateTime newTime;
+                newTime = (*lastTick);
 
                 apply_timezone_offset(&newTime);
                 increment_time(&newTime);
@@ -649,8 +653,19 @@ int main()
 
             case kGPS_RMC_NoSignal:
                 // Walk the decimal point across the display to indicate activity
-                display_no_signal();
+                _hasSignal = false;
                 break;
+
+            case kGPS_GSV_Updated:
+                if (!_hasSignal) {
+                    display_set_buffer_partial(1, nmea_get_sv());
+                    display_set_buffer_partial(3, nmea_get_tracking_sv());
+                    display_set_buffer_partial(5, nmea_get_cno());
+                    display_overlay_ticker();
+                    max7219_write_digits();
+                }
+                break;
+
 
             case kGPS_InvalidChecksum:
                 display_error_code(1);
@@ -688,6 +703,10 @@ void uart1_receive_irq(void) __interrupt(ITC_IRQ_UART1_RX)
 
 void gps_irq(void) __interrupt(ITC_IRQ_PORTB)
 {
+    if (!_hasSignal) {
+        return;
+    }
+
     max7219_write_digits();
 
     // Prepare the next update if it's not already being written by the main loop
