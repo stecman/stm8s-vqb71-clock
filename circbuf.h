@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stdint.h>
+#include <stdbool.h>
+
 typedef struct CircBuf {
     uint8_t data[64];
     uint8_t writeIndex;

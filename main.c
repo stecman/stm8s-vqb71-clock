@@ -1,68 +1,21 @@
-#include "stm8s.h"
-#include "stm8s_uart1.h"
+#include <stm8s.h>
+#include <stm8s_uart1.h>
 
-#include "circbuf.h"
 #include "delay.h"
+#include "display.h"
+#include "macros.h"
 #include "nmea.h"
+#include "pindefs.h"
+#include "uart.h"
 #include "ubxgps.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 
-// Return the number of items in a statically allocated array
-#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
-
-#define TEST_PIN_PORT GPIOC
-#define TEST_PIN_1 (1<<3)
-#define TEST_PIN_2 (1<<4)
-
-#define LDR_PORT GPIOD
-#define LDR_PIN (1<<3)
-
-#define GPS_PORT GPIOB
-#define GPS_PIN_TIMEPULSE (1<<4)
-#define GPS_PIN_EXTINT (1<<5)
-
-#define BUTTON_PORT GPIOA
-#define BUTTON_PIN_TIMEZONE (1<<2)
-#define BUTTON_PIN_DST (1<<3)
-
-#define MAX72XX_PORT GPIOD
-#define MAX72XX_LOAD_PIN (1<<2)
-
-#define SPIOUT_PORT GPIOC
-#define SPIOUT_CLK_PIN (1<<5)
-#define SPIOUT_MOSI_PIN (1<<6)
-
-#define kNumDigits 6
-#define kNumSegments 8
-static uint8_t _segmentWiseData[kNumSegments];
-
 static volatile int8_t _timezoneOffset = 13;
 static volatile DateTime _gpsTime;
 static volatile bool _gpsPreparingNextTime = false;
 static volatile bool _hasSignal = false;
-
-char uart_read_byte(void);
-
-static inline void uart_send_blocking(uint8_t byte)
-{
-    // Wait for the last transmission to complete
-    while ( (UART1->SR & UART1_SR_TC) == 0 );
-
-    // Put the byte in the TX buffer
-    UART1->DR = byte;
-}
-
-static void uart_send_stream_blocking(uint8_t* bytes, uint8_t length)
-{
-    while (length > 0) {
-        uart_send_blocking(*bytes);
-
-        --length;
-        ++bytes;
-    }
-}
 
 /**
  * Add a value to a checksum (8-Bit Fletcher Algorithm)
@@ -234,139 +187,7 @@ void gps_init()
     gps_set_nmea_send_rate(0, gps_disableMessages, sizeof(gps_disableMessages));
 }
 
-inline void spi_send_blocking(uint8_t data)
-{
-    // Load data into TX register
-    SPI->DR = data;
 
-    // Wait for TX buffer empty flag
-    while (!(SPI->SR & SPI_FLAG_TXE));
-}
-
-static void max7219_cmd(uint8_t address, uint8_t data)
-{
-    // Prepare for generating a rising edge on the LOAD pin
-    MAX72XX_PORT->ODR &= ~MAX72XX_LOAD_PIN;
-
-    spi_send_blocking(address);
-    spi_send_blocking(data);
-
-    // Wait for the SPI transmission to complete
-    while ((SPI->SR & SPI_FLAG_BSY));
-
-    // Generate rising edge to latch command and data bytes
-    MAX72XX_PORT->ODR |= MAX72XX_LOAD_PIN;
-}
-
-/**
- * Send complete digit/segment register configuration to the MAX72XX
- *
- * This must be called for max7219_set_digit calls to be shown on the display.
- *
- * All 8 digit (sink) registers need to be set at once as our wiring is flipped in order
- * to drive common anode displays. Each of our phsyical digits is represented by one bit
- * in each of the 8 digit registers (instead of the normal one-byte-per-digit wiring).
- */
-static void max7219_write_digits()
-{
-    // Block interrupts during display update to avoid contention with the brightness update interrupt
-    disableInterrupts();
-
-    for (uint8_t i = 0; i < kNumSegments; ++i) {
-        const uint8_t digitRegister = i + 1;
-        max7219_cmd(digitRegister, _segmentWiseData[i]);
-    }
-
-    enableInterrupts();
-}
-
-
-/**
- * Emulate setting a digit register on the MAX72XX (mapped for common anode wiring)
- * Digit register is 1-indexed.
- */
-
-// Map of logical digit index to rev 1.0 board wiring using a MAX7221
-const uint8_t max7219_digitMap[kNumSegments] = {
-    /* 0: */ 0,
-    /* 1: */ 4,
-    /* 2: */ 3,
-    /* 3: */ 1,
-    /* 4: */ 5,
-    /* 5: */ 2,
-};
-
-static void max7219_set_digit(uint8_t digitRegister, uint8_t segments)
-{
-    // Map logical digit to actual hardware wiring
-    const uint8_t mappedDigit = max7219_digitMap[digitRegister - 1];
-
-    // Create a bitmask for the 1-indexed digit register
-    const uint8_t digitMask = (1<<mappedDigit);
-
-    // Set/clear the digit's corresponding bit in each segment byte
-    for (uint8_t i = 0; i < kNumSegments; ++i) {
-        if (segments & 0x01) {
-            _segmentWiseData[i] |= digitMask;
-        } else {
-            _segmentWiseData[i] &= ~digitMask;
-        }
-
-        // Next segment
-        segments >>= 1;
-    }
-}
-
-/**
- * Emulate writing a digit under the MAX72XX's BCD display mode (mapped for common anode wiring)
- * Digit register is 1-indexed
- */
-const uint8_t max7219_bcdMap[16] = {
-    0b00111111, // 0
-    0b00000110, // 1
-    0b01011011, // 2
-    0b01001111, // 3
-    0b01100110, // 4
-    0b01101101, // 5
-    0b01111101, // 6
-    0b00000111, // 7
-    0b01111111, // 8
-    0b01101111, // 9
-    0b01000000, // -
-    0b01111001, // E
-    0b01110110, // H
-    0b00111000, // L
-    0b01110011, // P
-    0x0,        // Blank
-};
-
-static void max7219_set_digit_bcd(uint8_t digitRegister, uint8_t value)
-{
-    // Get segments that should be on
-    uint8_t segments = max7219_bcdMap[value & 0xF];
-
-    // Turn on the decimal point if the most-significant bit is set
-    segments |= (value & 0x80);
-
-    max7219_set_digit(digitRegister, segments);
-}
-
-static void max7219_init(void)
-{
-    // Disable binary decode mode
-    // We can't use this as we're using the MAX7219 to drive common-anode displays
-    max7219_cmd(0x09, 0x00);
-
-    // Set scan mode to 8x8
-    // This is the "number of digits" command, but we've wired these as the segments
-    max7219_cmd(0x0B, 0x7);
-
-    // Disable test mode
-    max7219_cmd(0x0F, 0);
-
-    // Enable display
-    max7219_cmd(0x0C, 1);
-}
 
 /**
  * Update the passed time to the current timezone offset
@@ -384,72 +205,6 @@ static void apply_timezone_offset(DateTime* now)
     }
 
     now->hour = hour;
-}
-
-/**
- * Send the passed time to the MAX7219 as 6 BCD digits
- */
-static void display_set_buffer_partial(uint8_t digitIndex, uint8_t value)
-{
-    // Manually split out tens and ones columns
-    // This saves some code space over using division
-    uint8_t tens = 0;
-
-    while (value >= 10) {
-        value -= 10;
-        ++tens;
-    }
-
-    max7219_set_digit_bcd(digitIndex, tens);
-    max7219_set_digit_bcd(digitIndex + 1, value);
-}
-
-/**
- * Send the passed time to the MAX7219 as 6 BCD digits
- */
-static void display_set_buffer(DateTime* now)
-{
-    display_set_buffer_partial(1, now->hour);
-    display_set_buffer_partial(3, now->minute);
-    display_set_buffer_partial(5, now->second);
-}
-
-/**
- * Set all digits on the display to a value with no illuminated segments
- */
-static void display_clear()
-{
-    for (uint8_t i = 0; i < kNumSegments; ++i) {
-        _segmentWiseData[i] = 0x0;
-    }
-}
-
-static void display_overlay_ticker()
-{
-    static uint8_t waitIndicator = 0;
-
-    // Clear segment on all digits
-    _segmentWiseData[7] = 0x0;
-
-    // Set segment on next phsyical digit
-    _segmentWiseData[7] = (1<<max7219_digitMap[waitIndicator]);
-
-    ++waitIndicator;
-    if (waitIndicator == kNumDigits) {
-        waitIndicator = 0;
-    }
-}
-
-void display_error_code(uint8_t code)
-{
-    display_clear();
-
-    // Display error code
-    max7219_set_digit_bcd(1, 11 /* E */);
-    max7219_set_digit(2, 0b01010000 /* r */);
-    max7219_set_digit_bcd(3, code);
-
-    max7219_write_digits();
 }
 
 static inline uint16_t read_adc_buffer()
@@ -608,20 +363,6 @@ int main()
     enableInterrupts();
 
     max7219_init();
-    max7219_write_digits();
-
-    max7219_cmd(0x0A, 0xA);
-
-    // Illuminate each of the outline segments one at a time
-    for (uint8_t i = 0; i < 6; ++i) {
-        _segmentWiseData[i] = 0xFF;
-        max7219_write_digits();
-        _delay_ms(50);
-
-        _segmentWiseData[i] = 0x00;
-        max7219_write_digits();
-    }
-
     gps_init();
     nmea_init();
 
@@ -662,7 +403,7 @@ int main()
                     display_set_buffer_partial(3, nmea_get_tracking_sv());
                     display_set_buffer_partial(5, nmea_get_cno());
                     display_overlay_ticker();
-                    max7219_write_digits();
+                    display_send_buffer();
                 }
                 break;
 
@@ -684,35 +425,31 @@ int main()
     }
 }
 
-volatile static CircBuf _uartBuffer;
-
-char uart_read_byte(void)
-{
-    // Block until a character is available
-    while (circbuf_is_empty(&_uartBuffer));
-
-    return circbuf_pop(&_uartBuffer);
-}
-
-void uart1_receive_irq(void) __interrupt(ITC_IRQ_UART1_RX)
-{
-    const uint8_t byte = ((uint8_t) UART1->DR);
-
-    circbuf_append(&_uartBuffer, byte);
-}
-
 void gps_irq(void) __interrupt(ITC_IRQ_PORTB)
 {
     if (!_hasSignal) {
         return;
     }
 
-    max7219_write_digits();
+    display_send_buffer();
 
     // Prepare the next update if it's not already being written by the main loop
     if (!_gpsPreparingNextTime) {
         increment_time(&_gpsTime);
         display_set_buffer(&_gpsTime);
+    }
+}
+
+void button_irq(void) __interrupt(ITC_IRQ_PORTA)
+{
+    _delay_ms(5);
+
+    if (BUTTON_PORT->IDR & ~BUTTON_PIN_DST) {
+        if (_timezoneOffset == 13) {
+            _timezoneOffset = -12;
+        } else {
+            _timezoneOffset++;
+        }
     }
 }
 

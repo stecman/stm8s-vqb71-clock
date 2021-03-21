@@ -1,5 +1,8 @@
 #include "delay.h"
 
+// This includes the typedefs normally found in stdint.h
+#include <stm8s.h>
+
 void _delay_us(uint16_t microseconds) {
     TIM4->PSCR = TIM4_PRESCALER_1; // Set prescaler
 

@@ -1,3 +1,7 @@
+# Default to using parallel build using all available cores
+import multiprocessing
+SetOption('num_jobs', multiprocessing.cpu_count())
+
 # Device definition for the stm8s.h header
 # This enables available features of the device library.
 STM8_DEVICE_DEFINE = "STM8S003"
@@ -88,7 +92,9 @@ build_target = env_target.Program(
     [
         'main.c',
         'delay.c',
+        'display.c',
         'nmea.c',
+        'uart.c',
         'driver/src/stm8s_clk.c',
         'driver/src/stm8s_spi.c',
         'driver/src/stm8s_uart1.c',
