@@ -126,8 +126,8 @@ MunitResult test_valid_rmc_sentence_2(const MunitParameter params[], void* user_
     return MUNIT_OK;
 }
 
-// Decode valid RMC sentence with an empty time field
-MunitResult test_valid_rmc_with_empty_time(const MunitParameter params[], void* user_data_or_fixture)
+// Decode valid RMC sentence with empty fix fields
+MunitResult test_valid_rmc_without_fix(const MunitParameter params[], void* user_data_or_fixture)
 {
     const char sentence[] = "$GPRMC,091502.00,V,,,,,,,040219,,,N*7C\r\n";
     const DateTime expected = {
@@ -147,16 +147,33 @@ MunitResult test_valid_rmc_with_empty_time(const MunitParameter params[], void* 
 // Decode valid RMC sentence with an empty time field
 MunitResult test_valid_gsv(const MunitParameter params[], void* user_data_or_fixture)
 {
-    GpsReadStatus status = run_nmea_parse(
-        "$GPGSV,3,1,10,23,38,230,44,29,71,156,47,07,29,116,41,08,09,081,36*7F\r\n"
-        "$GPGSV,3,2,10,10,07,189,,05,05,220,,09,34,274,42,18,25,309,44*72\r\n"
-        "$GPGSV,3,3,10,26,82,187,47,28,43,056,46*77\r\n"
-    );
+    {
+        // Sentence tracking most satellites
+        GpsReadStatus status = run_nmea_parse(
+            "$GPGSV,3,1,10,23,38,230,44,29,71,156,47,07,29,116,41,08,09,081,36*7F\r\n"
+            "$GPGSV,3,2,10,10,07,189,,05,05,220,,09,34,274,42,18,25,309,44*72\r\n"
+            "$GPGSV,3,3,10,26,82,187,47,28,43,056,46*77\r\n"
+        );
 
-    assert_equal_gps_status(status, kGPS_GSV_Updated);
-    munit_assert_uint8(nmea_get_sv(), ==, 10);
-    munit_assert_uint8(nmea_get_tracking_sv(), ==, 8);
-    munit_assert_uint8(nmea_get_cno(), ==, 43);
+        assert_equal_gps_status(status, kGPS_GSV_Updated);
+        munit_assert_uint8(nmea_get_sv(), ==, 10);
+        munit_assert_uint8(nmea_get_tracking_sv(), ==, 8);
+        munit_assert_uint8(nmea_get_cno(), ==, 43);
+    }
+
+    {
+        // Sentence with no tracking satellites
+        GpsReadStatus status = run_nmea_parse(
+            "$GPGSV,3,1,12,01,08,302,,03,56,258,,04,37,237,,06,02,207,*78\r\n"
+            "$GPGSV,3,2,12,09,05,243,,16,37,010,,22,56,313,,25,07,143,*74\r\n"
+            "$GPGSV,3,3,12,26,59,040,,29,06,114,,31,54,131,,32,15,072,*7F\r\n"
+        );
+
+        assert_equal_gps_status(status, kGPS_GSV_Updated);
+        munit_assert_uint8(nmea_get_sv(), ==, 12);
+        munit_assert_uint8(nmea_get_tracking_sv(), ==, 0);
+        munit_assert_uint8(nmea_get_cno(), ==, 0);
+    }
 
     return MUNIT_OK;
 }
@@ -275,7 +292,7 @@ MunitResult test_reject_endless_message(const MunitParameter params[], void* use
 MunitTest tests_nmea[] = {
     TEST_CASE(test_valid_rmc_sentence_1),
     TEST_CASE(test_valid_rmc_sentence_2),
-    TEST_CASE(test_valid_rmc_with_empty_time),
+    TEST_CASE(test_valid_rmc_without_fix),
     TEST_CASE(test_valid_sentence_stream),
     TEST_CASE(test_rmc_without_time),
     TEST_CASE(test_valid_gsv),

@@ -286,7 +286,11 @@ const uint8_t nmea_get_tracking_sv(void)
  */
 const uint8_t nmea_get_cno(void)
 {
-    return _state.gsv.cnoSum / _state.gsv.numTracking;
+    if (_state.gsv.numTracking) {
+        return _state.gsv.cnoSum / _state.gsv.numTracking;
+    } else {
+        return 0;
+    }
 }
 
 GpsReadStatus nmea_parse(char byte)
@@ -395,7 +399,7 @@ GpsReadStatus nmea_parse(char byte)
             if (receivedChecksum != _state.calculatedChecksum) {
                 return kGPS_InvalidChecksum;
             }
-            
+
             // Let the sentence specific parser handle end of sentence
             return _state.matchedType->onSentenceEnd();
         }
