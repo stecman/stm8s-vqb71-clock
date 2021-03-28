@@ -106,8 +106,6 @@ struct NmeaReader {
 
 // Sentence definitions
 
-#define NO_FIELD_LOOP {0,0}
-
 struct SentenceType {
     const char* identifier;
 
@@ -123,6 +121,9 @@ struct SentenceType {
         uint8_t to : 4;
     } fieldLoop;
 };
+
+// Value for SentenceType.fieldLoop if there is no loop in field processing
+#define NO_FIELD_LOOP {0,0}
 
 static void _parse_rmc(char byte);
 static void _parse_gsv(char byte);
