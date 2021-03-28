@@ -61,6 +61,11 @@ void display_set_buffer_ascii(uint8_t digitIndex, const char* str);
 void display_clear();
 
 /**
+ * Rotate the currently writable buffer to be ready for output by display_send_buffer
+ */
+void display_swap_buffers();
+
+/**
  * Clear all decimal segments and enable one in sequence
  * Each call, the enabled segment is stepped forward and loops
  */

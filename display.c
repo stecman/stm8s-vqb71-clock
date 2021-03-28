@@ -4,7 +4,10 @@
 
 #include <stddef.h>
 
-static uint8_t _segmentWiseData[kNumSegments];
+// Double buffer for segment data
+static uint8_t _buffers[2][kNumSegments] = {{0}, {0}};
+static uint8_t* _segmentWiseData = (uint8_t*) &_buffers[0];
+static uint8_t* _sendBuffer = (uint8_t*) &_buffers[1];
 
 // Map matching the MAX7219's BCD input mode
 // @see display_set_digit_bcd
@@ -131,7 +134,7 @@ void display_send_buffer()
 
     for (uint8_t i = 0; i < kNumSegments; ++i) {
         const uint8_t digitRegister = i + 1;
-        max7219_cmd(digitRegister, _segmentWiseData[i]);
+        max7219_cmd(digitRegister, _sendBuffer[i]);
     }
 
     enableInterrupts();
@@ -188,6 +191,21 @@ void display_clear()
     }
 }
 
+void display_swap_buffers()
+{
+    uint8_t* preparedData = _segmentWiseData;
+
+    // Set the old output buffer as the new input buffer
+    _segmentWiseData = _sendBuffer;
+
+    // Disable interrupts while setting the output pointer
+    // This is required as the LDW instruction takes 2 cycles.
+    // The delay introduced for a conflicting interrupt is at worst around 0.25uS
+    disableInterrupts();
+    _sendBuffer = preparedData;
+    enableInterrupts();
+}
+
 void display_overlay_ticker()
 {
     static uint8_t waitIndicator = 0;
@@ -213,5 +231,6 @@ void display_error_code(uint8_t code)
     max7219_set_digit(2, 0b01010000 /* r */);
     display_set_digit_bcd(4, code);
 
+    display_swap_buffers();
     display_send_buffer();
 }

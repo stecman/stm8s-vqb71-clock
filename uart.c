@@ -4,6 +4,11 @@
 
 volatile static CircBuf _uartBuffer;
 
+bool uart_has_byte(void)
+{
+    return !circbuf_is_empty(&_uartBuffer);
+}
+
 char uart_read_byte(void)
 {
     // Block until a character is available
@@ -31,7 +36,7 @@ void uart_send_stream_blocking(uint8_t* bytes, uint8_t length)
     }
 }
 
-void uart1_receive_irq(void) __interrupt(ITC_IRQ_UART1_RX)
+INTERRUPT_HANDLER(uart1_receive_irq, ITC_IRQ_UART1_RX)
 {
     const uint8_t byte = ((uint8_t) UART1->DR);
 

@@ -4,6 +4,12 @@
 #include <stdint.h>
 
 /**
+ * Return true if a byte is ready in the internal buffer
+ * @see uart_read_byte to retrieve any buffered bytes
+ */
+bool uart_has_byte(void);
+
+/**
  * Read one byte from the internal UART buffer
  * If no bytes are available, this blocks until the next UART receive interrupt
  */

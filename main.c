@@ -12,10 +12,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+static DateTime _currentTime;
 static volatile int8_t _timezoneOffset = 13;
-static volatile DateTime _gpsTime;
-static volatile bool _gpsPreparingNextTime = false;
+static volatile bool _timeNeedsIncrement = false;
 static volatile bool _hasSignal = false;
+
+static volatile uint16_t _ambientBrightnessSample;
+static volatile bool _hasBrightnessSample = false;
 
 /**
  * Add a value to a checksum (8-Bit Fletcher Algorithm)
@@ -216,17 +219,13 @@ static inline uint16_t read_adc_buffer()
     return result;
 }
 
-static uint8_t _displayBrightness = 0;
-
-void display_adjust_brightness(void)
+void display_adjust_brightness(const uint16_t reading)
 {
     // State to obtain an average of LDR readings
     // The size of this array should  be a power of two to make division simpler
     static uint16_t averageBuffer[16];
     static uint8_t writeIndex = 0;
     static uint16_t runningTotal = 0;
-
-    const uint16_t reading = read_adc_buffer();
 
     // Adjust running total with the new value
     runningTotal -= averageBuffer[writeIndex];
@@ -368,79 +367,83 @@ int main()
 
     while (true) {
 
-        const GpsReadStatus status = nmea_parse(uart_read_byte());
+        // Prepare the value to be sent at the next time pulse from the GPS if needed
+        // This is intentionally a bitwise AND
+        if (_hasSignal & _timeNeedsIncrement) {
+            _timeNeedsIncrement = false;
 
-        switch (status) {
-            case kGPS_RMC_TimeUpdated: {
-                _hasSignal = true;
+            increment_time(&_currentTime);
 
-                // Prepare the value to be sent at the next time pulse from the GPS
-                const DateTime* lastTick = nmea_get_time();
+            DateTime displayTime;
+            displayTime = _currentTime;
+            apply_timezone_offset(&displayTime);
+            display_set_buffer(&displayTime);
 
-                DateTime newTime;
-                newTime = (*lastTick);
+            display_swap_buffers();
+        }
 
-                apply_timezone_offset(&newTime);
-                increment_time(&newTime);
+        if (_hasBrightnessSample) {
+            _hasBrightnessSample = false;
+            display_adjust_brightness(_ambientBrightnessSample);
+        }
 
-                _gpsPreparingNextTime = true;
+        if (uart_has_byte()) {
+            const GpsReadStatus status = nmea_parse(uart_read_byte());
 
-                display_set_buffer(&newTime);
-                _gpsTime = newTime;
+            switch (status) {
+                case kGPS_RMC_TimeUpdated: {
+                    const DateTime* lastTick = nmea_get_time();
 
-                _gpsPreparingNextTime = false;
-                break;
-			}
-
-            case kGPS_RMC_NoSignal:
-                // Walk the decimal point across the display to indicate activity
-                _hasSignal = false;
-                break;
-
-            case kGPS_GSV_Updated:
-                if (!_hasSignal) {
-                    display_set_buffer_partial(1, nmea_get_sv());
-                    display_set_buffer_partial(3, nmea_get_tracking_sv());
-                    display_set_buffer_partial(5, nmea_get_cno());
-                    display_overlay_ticker();
-                    display_send_buffer();
+                    _currentTime = (*lastTick);
+                    _timeNeedsIncrement = true;
+                    _hasSignal = true;
+                    break;
                 }
-                break;
+
+                case kGPS_RMC_NoSignal:
+                    // Walk the decimal point across the display to indicate activity
+                    _hasSignal = false;
+                    break;
+
+                case kGPS_GSV_Updated:
+                    if (!_hasSignal) {
+                        display_set_buffer_partial(1, nmea_get_sv());
+                        display_set_buffer_partial(3, nmea_get_tracking_sv());
+                        display_set_buffer_partial(5, nmea_get_cno());
+                        display_overlay_ticker();
+                        display_swap_buffers();
+                        display_send_buffer();
+                    }
+                    break;
 
 
-            case kGPS_InvalidChecksum:
-                display_error_code(1);
-                break;
+                case kGPS_InvalidChecksum:
+                    display_error_code(1);
+                    break;
 
-            case kGPS_BadFormat:
-                // This state is returned if the UART line isn't pulled high (ie. GPS unplugged)
-                display_error_code(2);
-                break;
+                case kGPS_BadFormat:
+                    // This state is returned if the UART line isn't pulled high (ie. GPS unplugged)
+                    display_error_code(2);
+                    break;
 
-            case kGPS_UnknownState:
-                // This state is returned if the UART line isn't pulled high (ie. GPS unplugged)
-                display_error_code(3);
-                break;
+                case kGPS_UnknownState:
+                    // This state is returned if the UART line isn't pulled high (ie. GPS unplugged)
+                    display_error_code(3);
+                    break;
+            }
         }
     }
 }
 
-void gps_irq(void) __interrupt(ITC_IRQ_PORTB)
+INTERRUPT_HANDLER(gps_irq, ITC_IRQ_PORTB)
 {
-    if (!_hasSignal) {
-        return;
-    }
-
-    display_send_buffer();
-
-    // Prepare the next update if it's not already being written by the main loop
-    if (!_gpsPreparingNextTime) {
-        increment_time(&_gpsTime);
-        display_set_buffer(&_gpsTime);
+    if (_hasSignal) {
+        display_send_buffer();
+        _timeNeedsIncrement = true;
     }
 }
 
-void button_irq(void) __interrupt(ITC_IRQ_PORTA)
+INTERRUPT_HANDLER(button_irq, ITC_IRQ_PORTA)
 {
     _delay_ms(5);
 
@@ -453,10 +456,11 @@ void button_irq(void) __interrupt(ITC_IRQ_PORTA)
     }
 }
 
-void adc_irq(void) __interrupt(ITC_IRQ_ADC1)
+INTERRUPT_HANDLER(adc_irq, ITC_IRQ_ADC1)
 {
     // Clear the end of conversion bit so this interrupt can fire again
     ADC1->CSR &= ~ADC1_CSR_EOC;
 
-    display_adjust_brightness();
+    _ambientBrightnessSample = read_adc_buffer();
+    _hasBrightnessSample = true;
 }
