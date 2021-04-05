@@ -78,6 +78,15 @@ env_target.Alias(
 )
 
 env_target.Alias(
+    'reset',
+    env_target.Command(
+        '_reset_phony_output',
+        None,
+        'openocd -f openocd-stlink.cfg -c "reset ()"'
+    )
+)
+
+env_target.Alias(
     'size',
     env_target.Command(
         '_size_phony_output',
