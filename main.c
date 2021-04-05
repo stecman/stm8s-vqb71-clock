@@ -12,13 +12,57 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-static DateTime _currentTime;
-static volatile int8_t _timezoneOffset = 13;
-static volatile bool _timeNeedsIncrement = false;
-static volatile bool _hasSignal = false;
+enum DisplayState {
+    kDisplayState_StartupAnimation,
+    kDisplayState_Time,
+    kDisplayState_TimeRefresh,
+    kDisplayState_TimezoneChange,
+    kDisplayState_TimezoneDisplay,
+    kDisplayState_Wait,
+};
 
+enum ButtonState {
+    kButtonState_Unpressed,
+    kButtonState_Debounce,
+    kButtonState_ShortPress,
+    kButtonState_LongPress,
+};
+
+struct Button {
+    // Pin registers
+    GPIO_TypeDef* port;
+    uint8_t pinMask;
+
+    // Current state machine mode of the button
+    enum ButtonState state;
+
+    // Next systick value that the button cares about
+    uint16_t nextTick;
+};
+
+const uint8_t kButtonDebounceMs = 5;
+const uint16_t kButtonLongPressMs = 1000;
+
+// Time display state
+static DateTime _currentTime;
+static int8_t _timezoneOffset = 12;
+static bool _timeNeedsIncrement = false;
+static bool _timeNeedsDisplay = false;
+static bool _hasSignal = false;
+
+// Display state machine
+static volatile enum DisplayState _displayState = kDisplayState_StartupAnimation;
+static uint16_t _displayWaitTick;
+static enum DisplayState _displayWaitNextState;
+
+// Button state
+static struct Button _timezoneBtn;
+static struct Button _dstBtn;
+
+// Brightness / ADC reading state
 static volatile uint16_t _ambientBrightnessSample;
 static volatile bool _hasBrightnessSample = false;
+
 
 // Account for 39.5us delay between top-of-second and complete display update
 #define kTimepulseOffsetNs 39500
@@ -156,6 +200,134 @@ void increment_time(DateTime* tim)
     }
 }
 
+void auto_brightness_init(void)
+{
+    // Enable ADC for ambient light sensing
+    // Conversion is triggered by timer 1's TRGO event
+    ADC1->CSR = ADC1_CSR_EOCIE | // Enable interrupt at end of conversion
+                ADC1_CHANNEL_4; // Convert on ADC channel 4 (pin D3)
+
+    ADC1->CR2 = ADC1_CR2_ALIGN | // Place LSB in lower register
+                ADC1_CR2_EXTTRIG; // Start conversion on external event (TIM1 TRGO event)
+
+    ADC1->CR1 = ADC1_PRESSEL_FCPU_D18 | // ADC @ fcpu/18
+                ADC1_CR1_ADON; // Power on the ADC
+
+
+    // Configure TIM1 to trigger ADC conversion automatically
+    const uint16_t tim1_prescaler = 16000; // Prescale the 16MHz system clock to a 1ms tick
+    TIM1->PSCRH = (tim1_prescaler >> 8);
+    TIM1->PSCRL = (tim1_prescaler & 0xFF);
+
+    const uint16_t tim1_auto_reload = 69; // Number of milliseconds to count to
+    TIM1->ARRH = (tim1_auto_reload >> 8);
+    TIM1->ARRL = (tim1_auto_reload & 0xFF);
+
+    const uint16_t tim1_compare_reg1 = 1; // Create a 1ms OC1REF pulse (PWM1 mode)
+    TIM1->CCR1H = (tim1_compare_reg1 >> 8);
+    TIM1->CCR1L = (tim1_compare_reg1 & 0xFF);
+
+    // Use capture-compare channel 1 to trigger ADC conversions
+    // This doesn't have any affect on pin outputs as TIM1_CCER1_CC1E and TIM1_BKR_MOE are not set
+    TIM1->CCMR1 = TIM1_OCMODE_PWM1; // Make OC1REF high when counter is less than CCR1 and low when higher
+    TIM1->EGR = TIM1_EGR_CC1G; // Enable compare register 1 event
+    TIM1->CR2 = TIM1_TRGOSOURCE_OC1REF; // Enable TRGO event on compare match
+
+    TIM1->EGR |= TIM1_EGR_UG; // Generate an update event to register new settings
+
+    TIM1->CR1 = TIM1_CR1_CEN; // Enable the counter
+}
+
+void systick_init(void)
+{
+    // Use TIM2 to get a tick every 1.024ms
+    // Only TIM1 can generate TRGO events, so We can't substitute that in here.
+    // The accuracy of this isn't terribly important as it's for timing human interactions
+    TIM2->PSCR = TIM2_PRESCALER_16384;
+    TIM2->EGR |= TIM2_EGR_UG; // Generate an update event to register new settings
+    TIM2->CR1 = TIM2_CR1_CEN; // Enable the counter
+}
+
+uint16_t systick_get(void)
+{
+    uint16_t value = TIM2->CNTRL;
+    value |= (TIM2->CNTRH << 8);
+
+    return value;
+}
+
+
+static void button_init(struct Button* btn, GPIO_TypeDef* port, uint8_t pinMask)
+{
+    // Configure GPIO
+    port->DDR &= ~(pinMask); // Input mode
+    port->CR1 |= pinMask; // Enable internal pull-up
+
+    // Initialise struct
+    btn->port = port;
+    btn->pinMask = pinMask;
+    btn->nextTick = 0;
+    btn->state = kButtonState_Unpressed;
+}
+
+static void button_update(struct Button* btn)
+{
+    switch (btn->state) {
+        case kButtonState_Unpressed:
+            // Wait fo the button to be pressed
+            if ((btn->port->IDR & btn->pinMask) == 0) {
+                btn->state = kButtonState_Debounce;
+                btn->nextTick = systick_get() + kButtonDebounceMs;
+            }
+
+            break;
+
+        case kButtonState_Debounce:
+            // Check button state after debounce delay
+            if (systick_get() >= btn->nextTick) {
+                if ((btn->port->IDR & btn->pinMask) == 0) {
+                    btn->state = kButtonState_ShortPress;
+                    btn->nextTick = systick_get() + kButtonLongPressMs;
+                } else {
+                    btn->state = kButtonState_Unpressed;
+                }
+            }
+
+            break;
+
+        case kButtonState_ShortPress:
+            if (systick_get() >= btn->nextTick) {
+                btn->state = kButtonState_LongPress;
+            }
+
+            // Intentional fall-through
+
+        case kButtonState_LongPress:
+            if ((btn->port->IDR & btn->pinMask) != 0) {
+                btn->state = kButtonState_Debounce;
+                btn->nextTick = systick_get() + kButtonDebounceMs;
+            }
+
+            break;
+    }
+}
+
+static bool button_pressed(struct Button* btn)
+{
+    return btn->state & (kButtonState_ShortPress | kButtonState_LongPress);
+}
+
+
+static void wait(uint16_t milliseconds, enum DisplayState nextState)
+{
+    // Configure the wait
+    _displayWaitTick = systick_get() + milliseconds;
+    _displayWaitNextState = nextState;
+
+    // Enter wait state
+    _displayState = kDisplayState_Wait;
+}
+
 int main()
 {
     // Configure the clock for maximum speed on the 16MHz HSI oscillator
@@ -203,32 +375,145 @@ int main()
     SPI_Cmd(ENABLE);
 
     uart_init();
+    systick_init();
+
+    // Depends on SPI
     max7219_init();
+    auto_brightness_init();
+
+    // Depends on UART
     gps_init();
     nmea_init();
+
+    button_init(&_timezoneBtn, BUTTON_PORT, BUTTON_PIN_TIMEZONE);
+    button_init(&_dstBtn, BUTTON_PORT, BUTTON_PIN_DST);
 
     enableInterrupts();
 
     while (true) {
 
         // Prepare the value to be sent at the next time pulse from the GPS if needed
-        // This is intentionally a bitwise AND
-        if (_hasSignal & _timeNeedsIncrement) {
+        if (_timeNeedsIncrement) {
             _timeNeedsIncrement = false;
-
+            _timeNeedsDisplay = true;
             increment_time(&_currentTime);
-
-            DateTime displayTime;
-            displayTime = _currentTime;
-            apply_timezone_offset(&displayTime);
-            display_set_buffer(&displayTime);
-
-            display_swap_buffers();
         }
+
+        // Always update display brightness from interrupt flag
+        if (_hasBrightnessSample) {
+            _hasBrightnessSample = false;
+            display_adjust_brightness(_ambientBrightnessSample);
+        }
+
+        // Update button state machines
+        button_update(&_timezoneBtn);
+        button_update(&_dstBtn);
 
         if (_hasBrightnessSample) {
             _hasBrightnessSample = false;
             display_adjust_brightness(_ambientBrightnessSample);
+        }
+
+        switch (_displayState) {
+            case kDisplayState_StartupAnimation: {
+                static uint8_t frame = 0;
+                static uint16_t nextFrame = 0;
+                static uint8_t data = 0;
+
+                if (systick_get() >= nextFrame) {
+                    nextFrame = systick_get() + 70;
+
+
+                    data ^= (1 << (frame % kNumSegments));
+
+                    // Set segments on all digits (1-indexed)
+                    for (uint8_t i = 1; i < kNumDigits + 1; ++i) {
+                        max7219_set_digit(i, data);
+                    }
+
+                    display_swap_buffers();
+                    display_send_buffer();
+
+                    ++frame;
+                    if (frame == kNumSegments * 2) {
+                        _displayState = kDisplayState_Time;
+                    }
+                }
+
+                break;
+            }
+
+            case kDisplayState_TimeRefresh: {
+                _timeNeedsDisplay = true;
+                _displayState = kDisplayState_Time;
+
+                // Intentional fall-through
+            }
+
+            case kDisplayState_Time: {
+                if (_hasSignal) {
+                    if (_timeNeedsDisplay) {
+                        DateTime displayTime;
+
+                        displayTime = _currentTime;
+                        apply_timezone_offset(&displayTime);
+                        display_set_buffer(&displayTime);
+                        display_swap_buffers();
+                    }
+                }
+
+                if (button_pressed(&_timezoneBtn)) {
+                    _displayState = kDisplayState_TimezoneDisplay;
+                }
+
+                break;
+            }
+
+            case kDisplayState_TimezoneChange: {
+                if (button_pressed(&_timezoneBtn)) {
+                    _timezoneOffset++;
+                    if (_timezoneOffset > 13) {
+                        _timezoneOffset = -12;
+                    }
+                }
+
+                // Intentional fall-through
+            }
+
+            case kDisplayState_TimezoneDisplay: {
+                uint8_t bcdSign;
+                uint8_t tzAbsolute;
+
+                if (_timezoneOffset < 0) {
+                    bcdSign = 0xA; // "-""
+                    tzAbsolute = _timezoneOffset * -1;
+                } else {
+                    bcdSign = 0xE; // "P"
+                    tzAbsolute = _timezoneOffset;
+                }
+
+                display_clear();
+                display_set_digit_bcd(2, bcdSign);
+                display_set_buffer_partial(3, tzAbsolute);
+                display_swap_buffers();
+                display_send_buffer();
+
+                if (!button_pressed(&_timezoneBtn)) {
+                    wait(800, kDisplayState_TimeRefresh);
+                } else {
+                    wait(600, kDisplayState_TimezoneChange);
+                }
+
+                break;
+            }
+
+            case kDisplayState_Wait: {
+                if (systick_get() >= _displayWaitTick) {
+                    _displayState = _displayWaitNextState;
+                }
+
+                break;
+            }
         }
 
         if (uart_has_byte()) {
@@ -284,19 +569,6 @@ INTERRUPT_HANDLER(gps_irq, ITC_IRQ_PORTB)
     if (_hasSignal) {
         display_send_buffer();
         _timeNeedsIncrement = true;
-    }
-}
-
-INTERRUPT_HANDLER(button_irq, ITC_IRQ_PORTA)
-{
-    _delay_ms(5);
-
-    if (BUTTON_PORT->IDR & ~BUTTON_PIN_DST) {
-        if (_timezoneOffset == 13) {
-            _timezoneOffset = -12;
-        } else {
-            _timezoneOffset++;
-        }
     }
 }
 
