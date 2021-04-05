@@ -75,3 +75,8 @@ void display_overlay_ticker();
  * Display an "Er" with the passed digit
  */
 void display_error_code(uint8_t code);
+
+/**
+ * Feed an ambient brightness ADC reading to update the display brightness
+ */
+void display_adjust_brightness(const uint16_t reading);

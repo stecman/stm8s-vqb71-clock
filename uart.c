@@ -4,6 +4,20 @@
 
 volatile static CircBuf _uartBuffer;
 
+void uart_init(void)
+{
+    // Enable UART for GPS comms
+    UART1_Init(9600, // Baud rate
+               UART1_WORDLENGTH_8D,
+               UART1_STOPBITS_1,
+               UART1_PARITY_NO,
+               UART1_SYNCMODE_CLOCK_DISABLE,
+               UART1_MODE_TXRX_ENABLE);
+
+    UART1_ITConfig(UART1_IT_RXNE_OR, ENABLE);
+    UART1_Cmd(ENABLE);
+}
+
 bool uart_has_byte(void)
 {
     return !circbuf_is_empty(&_uartBuffer);

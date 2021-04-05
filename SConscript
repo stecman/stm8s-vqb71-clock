@@ -94,6 +94,7 @@ build_target = env_target.Program(
         'display.c',
         'nmea.c',
         'uart.c',
+        'ubxgps.c',
         'driver/src/stm8s_clk.c',
         'driver/src/stm8s_spi.c',
         'driver/src/stm8s_uart1.c',

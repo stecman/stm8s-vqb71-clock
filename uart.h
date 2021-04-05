@@ -1,7 +1,12 @@
 #pragma once
 
 #include <stm8s.h>
-#include <stdint.h>
+
+/**
+ * Set up the UART peripheral
+ * This must be called before other uart_* functions
+ */
+void uart_init(void);
 
 /**
  * Return true if a byte is ready in the internal buffer
@@ -30,4 +35,4 @@ void uart_send_stream_blocking(uint8_t* bytes, uint8_t length);
 /**
  * Interrupt handler for UART1 receive
  */
-void uart1_receive_irq(void) __interrupt(ITC_IRQ_UART1_RX);
+INTERRUPT_HANDLER(uart1_receive_irq, ITC_IRQ_UART1_RX);

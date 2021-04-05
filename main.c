@@ -20,88 +20,6 @@ static volatile bool _hasSignal = false;
 static volatile uint16_t _ambientBrightnessSample;
 static volatile bool _hasBrightnessSample = false;
 
-/**
- * Add a value to a checksum (8-Bit Fletcher Algorithm)
- * The initial checksum value must be {0,0}
- */
-static inline void ubx_update_checksum(uint8_t* checksum, uint8_t value)
-{
-	checksum[0] += value;
-	checksum[1] += checksum[0];
-}
-
-static void ubx_update_checksum_multi(uint8_t* checksum, uint8_t* data, uint16_t length)
-{
-	for (uint16_t i = 0; i < length; ++i) {
-		ubx_update_checksum(checksum, data[i]);
-	}
-}
-
-enum UbxResponse {
-    kUbxNack = 0, // Matches the NACK message ID
-    kUbxAck = 1,  // Matches the ACK message ID
-    kUbxResponseTimeout = 0x55,
-    kUbxBadResponse = 0xBD
-};
-
-static enum UbxResponse ubx_send(uint8_t msgClass, uint8_t msgId, uint8_t* data, uint16_t length)
-{
-    // Send packet to receiver
-    {
-    	uint8_t header[6] = {
-    		0xB5, 0x62, // Every message starts with these sync characters
-    		msgClass,
-    		msgId,
-    		(uint8_t) (length & 0xFF), // Payload length as little-endian (LSB first)
-    		(uint8_t) (length >> 8),
-    	};
-
-    	uint8_t checksum[2] = {0, 0};
-
-    	// Checksum includes the payload and the header minus its two fixed bytes
-    	ubx_update_checksum_multi(checksum, (uint8_t*)(&header) + 2, sizeof(header) - 2);
-    	ubx_update_checksum_multi(checksum, data, length);
-
-    	// Send the message over serial
-    	uart_send_stream_blocking(header, sizeof(header));
-    	uart_send_stream_blocking(data, length);
-    	uart_send_stream_blocking(checksum, sizeof(checksum));
-    }
-
-    // Look for receiver response
-    // TODO: make this a more generic UBX packet reading routine that verifies checksum
-    // TODO: handle response timeout. Currently this blocks forever if the GPS doesn't respond
-    {
-        const uint8_t response_header[] = {0xB5, 0x62, 0x05};
-
-        uint8_t searchIndex = 0;
-        enum UbxResponse response = kUbxBadResponse;
-
-        // Wait for the ACK/NACK response header
-        while (searchIndex < sizeof(response_header)) {
-            const char byte = uart_read_byte();
-
-            if (byte == response_header[searchIndex]) {
-                ++searchIndex;
-            }
-        }
-
-        // Read message ID as response
-        response = uart_read_byte();
-
-        // Discard packet length as we're not using it here
-        uart_read_byte();
-        uart_read_byte();
-
-        if (uart_read_byte() == msgClass &&
-            uart_read_byte() == msgId) {
-            return response;
-        } else {
-            return kUbxBadResponse;
-        }
-    }
-}
-
 // Account for 39.5us delay between top-of-second and complete display update
 #define kTimepulseOffsetNs 39500
 const uint8_t gps_cfg_tp5_data[] = {
@@ -219,28 +137,6 @@ static inline uint16_t read_adc_buffer()
     return result;
 }
 
-void display_adjust_brightness(const uint16_t reading)
-{
-    // State to obtain an average of LDR readings
-    // The size of this array should  be a power of two to make division simpler
-    static uint16_t averageBuffer[16];
-    static uint8_t writeIndex = 0;
-    static uint16_t runningTotal = 0;
-
-    // Adjust running total with the new value
-    runningTotal -= averageBuffer[writeIndex];
-    runningTotal += reading;
-
-    // Append new reading
-    averageBuffer[writeIndex] = reading;
-    writeIndex = (writeIndex + 1) % COUNT_OF(averageBuffer);
-
-    const uint16_t average = runningTotal/COUNT_OF(averageBuffer);
-
-    // Scale the 1024 ADC values to fit in the 16 brightness levels of the MAX72XX
-    max7219_cmd(0x0A, average / 64);
-}
-
 void increment_time(DateTime* tim)
 {
     ++tim->second;
@@ -281,12 +177,6 @@ int main()
     GPS_PORT->CR1 |= GPS_PIN_TIMEPULSE;  // Enable internal pull-up
     GPS_PORT->CR2 |= GPS_PIN_TIMEPULSE;  // Interrupt enabled
 
-    // Buttons as input
-    EXTI->CR1 |= 0x02; // Falling edge triggers interrupt
-    BUTTON_PORT->DDR &= ~(BUTTON_PIN_DST | BUTTON_PIN_TIMEZONE); // Input mode
-    BUTTON_PORT->CR1 |= BUTTON_PIN_DST | BUTTON_PIN_TIMEZONE; // Enable internal pull-up
-    BUTTON_PORT->CR2 |= BUTTON_PIN_DST | BUTTON_PIN_TIMEZONE;  // Interrupt enabled
-
     // MAX7219  chip select as output
     MAX72XX_PORT->DDR |= MAX72XX_LOAD_PIN; // Output mode
     MAX72XX_PORT->CR1 |= MAX72XX_LOAD_PIN; // Push-pull mode
@@ -312,58 +202,12 @@ int main()
 
     SPI_Cmd(ENABLE);
 
-    // Enable UART for GPS comms
-    UART1_Init(9600, // Baud rate
-               UART1_WORDLENGTH_8D,
-               UART1_STOPBITS_1,
-               UART1_PARITY_NO,
-               UART1_SYNCMODE_CLOCK_DISABLE,
-               UART1_MODE_TXRX_ENABLE);
-
-    UART1_ITConfig(UART1_IT_RXNE_OR, ENABLE);
-    UART1_Cmd(ENABLE);
-
-
-    // Enable ADC for ambient light sensing
-    // Conversion is triggered by timer 1's TRGO event
-    ADC1->CSR = ADC1_CSR_EOCIE | // Enable interrupt at end of conversion
-                ADC1_CHANNEL_4; // Convert on ADC channel 4 (pin D3)
-
-    ADC1->CR2 = ADC1_CR2_ALIGN | // Place LSB in lower register
-                ADC1_CR2_EXTTRIG; // Start conversion on external event (TIM1 TRGO event)
-
-    ADC1->CR1 = ADC1_PRESSEL_FCPU_D18 | // ADC @ fcpu/18
-                ADC1_CR1_ADON; // Power on the ADC
-
-
-    // Configure TIM1 to trigger ADC conversion automatically
-    const uint16_t tim1_prescaler = 16000; // Prescale the 16MHz system clock to a 1ms tick
-    TIM1->PSCRH = (tim1_prescaler >> 8);
-    TIM1->PSCRL = (tim1_prescaler & 0xFF);
-
-    const uint16_t tim1_auto_reload = 69; // Number of milliseconds to count to
-    TIM1->ARRH = (tim1_auto_reload >> 8);
-    TIM1->ARRL = (tim1_auto_reload & 0xFF);
-
-    const uint16_t tim1_compare_reg1 = 1; // Create a 1ms OC1REF pulse (PWM1 mode)
-    TIM1->CCR1H = (tim1_compare_reg1 >> 8);
-    TIM1->CCR1L = (tim1_compare_reg1 & 0xFF);
-
-    // Use capture-compare channel 1 to trigger ADC conversions
-    // This doesn't have any affect on pin outputs as TIM1_CCER1_CC1E and TIM1_BKR_MOE are not set
-    TIM1->CCMR1 = TIM1_OCMODE_PWM1; // Make OC1REF high when counter is less than CCR1 and low when higher
-    TIM1->EGR = TIM1_EGR_CC1G; // Enable compare register 1 event
-    TIM1->CR2 = TIM1_TRGOSOURCE_OC1REF; // Enable TRGO event on compare match
-
-    TIM1->EGR |= TIM1_EGR_UG; // Generate an update event to register new settings
-
-    TIM1->CR1 = TIM1_CR1_CEN; // Enable the counter
-
-    enableInterrupts();
-
+    uart_init();
     max7219_init();
     gps_init();
     nmea_init();
+
+    enableInterrupts();
 
     while (true) {
 

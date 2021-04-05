@@ -1,4 +1,5 @@
 #include "display.h"
+#include "macros.h"
 #include "pindefs.h"
 #include "spi.h"
 
@@ -233,4 +234,26 @@ void display_error_code(uint8_t code)
 
     display_swap_buffers();
     display_send_buffer();
+}
+
+void display_adjust_brightness(const uint16_t reading)
+{
+    // State to obtain an average of LDR readings
+    // The size of this array should  be a power of two to make division simpler
+    static uint16_t averageBuffer[16];
+    static uint8_t writeIndex = 0;
+    static uint16_t runningTotal = 0;
+
+    // Adjust running total with the new value
+    runningTotal -= averageBuffer[writeIndex];
+    runningTotal += reading;
+
+    // Append new reading
+    averageBuffer[writeIndex] = reading;
+    writeIndex = (writeIndex + 1) % COUNT_OF(averageBuffer);
+
+    const uint16_t average = runningTotal/COUNT_OF(averageBuffer);
+
+    // Scale the 1024 ADC values to fit in the 16 brightness levels of the MAX72XX
+    max7219_cmd(0x0A, average / 64);
 }
