@@ -435,7 +435,7 @@ int main()
                     display_send_buffer();
 
                     ++frame;
-                    if (frame == kNumSegments * 2) {
+                    if (frame == kNumSegments * 4) {
                         _displayState = kDisplayState_Time;
                     }
                 }
@@ -514,6 +514,12 @@ int main()
 
                 break;
             }
+        }
+
+        // Don't do anything else while the display test is running
+        // TODO: Allow this to run in parallel with GPS reads without messing up the display
+        if (_displayState == kDisplayState_StartupAnimation) {
+            continue;
         }
 
         if (uart_has_byte()) {
